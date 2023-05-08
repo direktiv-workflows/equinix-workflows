@@ -1,10 +1,12 @@
 # Sample Equinix Workflows for K3s deployment using Ansible
 
-## Description
+The Equinix workflow example will provision bare metal servers on the equinix Metal platform using Python code provided by Equinix Metal. It will verify the connectivity to the machines before deploying a k3s (lightweight Kubernetes platform) to the machines using an Ansible playbook available from the Equinix Metal Ansible playbook repository. It will also rotate the passwords on the newly provisioned machines and store these in a Hashicorp Vault. Finally, it will send a Slack message to a channel with the `.kubeconfig` information to allow a user to connect to the K8S platform. Any errors or execeptions will be created as incidents in ServiceNow.
+
+## Workflow Overview
 
 The orchestration policy built has the following flow:
 
-1.  provision-machines.yaml (starts the provisioning) by taking the input described in the [Input](#Input)) section below. The first step of the workflow will provision machines using [Python API](https://deploy.equinix.com/developers/docs/metal/libraries/python/). This code running is in the provision-machines.yaml.metal-python.py Python script and run serverless as a container in Direktiv
+1.  `provision-machines.yaml` (starts the provisioning) by taking the input described in the [Input](#Input)) section below. The first step of the workflow will provision machines using [Python API](https://deploy.equinix.com/developers/docs/metal/libraries/python/). This code running is in the provision-machines.yaml.metal-python.py Python script and run serverless as a container in Direktiv
 2. The next step of the policy will check the status of the machine using the Metal API. The workflow is run as a subflow from the master workflow (called check-machine-status.yaml)
 3. Once the machine are confirmed to be up and running, another subflow is used to check SSH connectivity (check-connectivity.yaml)
 4. If the machines are all reachable, Direktiv generates a "com.equinix.password.update" event FOR EACH device, which will kick of a workflow ASYNCRHONOUSLY to update the password for the device in HashiCorp Vault (the workflow is called change-passwords.yaml)    
@@ -18,7 +20,26 @@ The orchestration policy built has the following flow:
 6. Send a Slack message with the "kubeconfig" file
 7. Send an email with the results and the "kubeconfig" file
 
-## Input
+## Variables
+
+ - metal-python.py: Python code for provisioning Equinix Metal machines
+
+## Secrets
+
+ - EQUINIX_METAL_TOKEN: The equinix metal token on a org level
+ - EQUINIX_ID_RSA: The id_rsa key used to connect to Equinix Metal provisioned machines
+ - SLACK_URL: Slack URL to send messages for Slack container
+ - EMAIL_USER, EMAIL_PASSWORD; Email credentials
+ - VAULT_TOKEN: HashiCorp Vault Token
+ - VAULT_ADDRESS: HashiCorp Vault Address
+ - VAULT_STORE: HashiCorp Vault Store
+ - SNC_URL, SNC_USER, SNC_PASSWORD: ServiceNow credentials
+
+## Namespace Services
+
+ - None
+
+## Input examples
 ```json
 { 
     "projectid": "6b52e3ce-f22f-49d0-ac1c-17db1d323d9a", 
@@ -28,21 +49,6 @@ The orchestration policy built has the following flow:
     "devicecount": 3, 
     "deviceos": "ubuntu_20_04" 
 }
-```
-
-## Secrets
-```bash
-EQUINIX_METAL_TOKEN: "The equinix metal token on a org level"
-EQUINIX_ID_RSA: "The id_rsa key used to connect to Equinix Metal provisioned machines"
-SLACK_URL: "Slack URL to send messages for Slack container"
-EMAIL_USER: "Email username (send email)"
-EMAIL_PASSWORD: "Email password (send email)"
-VAULT_TOKEN: "HashiCorp Vault Token"
-VAULT_ADDRESS: "HashiCorp Vault Address"
-VAULT_STORE: "HashiCorp Vault Store"
-SNC_URL: "ServiceNow URL"
-SNC_USER: "ServiceNow Username"
-SNC_PASSWORD: "ServiceNow password"
 ```
 
 ## Diagram
