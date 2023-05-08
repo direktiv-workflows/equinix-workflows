@@ -1,0 +1,220 @@
+#
+# This is the master workflow for the Equinix demonstration. See the README for a full description in the
+# repository on GitHub
+#
+description: "This is the entry point script into Direktiv to provision the 3 small machines in Equinix Metal"
+
+functions:
+  # This is the Python container that runs serverless Python code
+  - id: python
+    image: gcr.io/direktiv/functions/python:1.0
+    type: knative-workflow
+  
+  # This subflow will check the machine availability
+  - id: subflow-check-status
+    workflow: connectivity/check-machine-status
+    type: subflow
+
+  # This subflow will check the machine SSH connectivity
+  - id: subflow-check-connectivity
+    workflow: connectivity/check-connectivity
+    type: subflow
+
+  # This subflow provisions K3s using Ansible
+  - id: subflow-ansible-k3s
+    workflow: provision/provision-k3s-ansible
+    type: subflow
+  
+  # Slack message container
+  - id: slack
+    image: gcr.io/direktiv/functions/slack:1.0
+    type: knative-workflow
+  
+  # Send email container
+  - id: send-email
+    image: gcr.io/direktiv/functions/sendmail:1.0
+    type: knative-workflow
+    
+states:
+  #
+  # Start a looop to iterate through each of the machines in .machinecount
+  #
+  - id: check-if-done 
+    type: switch 
+    conditions:
+    - condition: 'jq((.devicecount - 1) >= 0 )'
+      transition: provision-machine
+    defaultTransform: 'jq(del(.return))'
+    defaultTransition: wait-for-ready
+
+  #
+  # Provision the machine using Equinix Metal Python code
+  #
+  - id: provision-machine
+    log: Provision machines in Equinix Metal using Python API in serverless mode
+    type: action
+    action:
+      function: python
+      secrets: ["EQUINIX_METAL_TOKEN"]
+      input:
+        commands:
+        - command: pyenv local 3.8.13
+        - command: python3 -m pip install packet-python
+        - command: python3 metal-python.py
+          envs: 
+          - name: EQUINIX_METAL_TOKEN
+            value: jq(.secrets.EQUINIX_METAL_TOKEN)
+          - name: PROJECT_ID
+            value: jq(.projectid)
+          - name: EQUINIX_PLAN
+            value: jq(.eqplan)
+          - name: EQUINIX_METRO
+            value: jq(.eqmetro)
+          - name: DEVICE_NAME_PREFIX
+            value: jq(.deviceprefix)
+          - name: DEVICE_COUNT
+            value: jq(.devicecount | tostring)
+          - name: DEVICE_OS
+            value: jq(.deviceos)
+      files:
+      - key: metal-python.py
+        scope: workflow
+    transform: jq(.devicecount = (.devicecount -1 ) | .deviceids += [.return.python[2].result.deviceid])
+    transition: check-if-done 
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  #
+  # Run in parallel a subflow for each machine to check whether they are available
+  #
+  - id: wait-for-ready
+    # log: jq(.)
+    log: Checking whether the devices are in a ready state 
+    type: foreach
+    array: 'jq(.deviceids as $deviceids | del(.deviceids) | . as $object | [ $deviceids[] | {deviceid: .} + $object ])'
+    action:
+      function: subflow-check-status
+      input:
+        projectid: jq(.projectid)
+        deviceid: jq(.deviceid)
+        available: false
+    transition: check-connectivity
+    transform: 'jq({ devices: [.return[].return[0].result | del(.actions)] })'
+    catch:
+    - error: "*"
+      transition: exception-catch
+  
+  #
+  # Run in parallel a subflow for each machine to check whether they are SSH reachable
+  #
+  - id: check-connectivity
+    # log: jq(.)
+    log: Generating an event to for testing connectivity
+    type: foreach
+    array: 'jq( .devices | . )'
+    action:
+      function: subflow-check-connectivity
+      input: jq(.)
+    transform: 'jq(del(.return) | {devicescount: .devices, devices: .devices } )'
+    transition: check-if-done-update-password
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  #
+  # Start a looop to iterate generate an event for each of the devices to update the passwords
+  #
+  - id: check-if-done-update-password
+    type: switch
+    conditions: 
+    - condition: 'jq( (.devicescount | length) > 0)'
+      transition: create-up-date-password-event
+    defaultTransition: provision-k3s
+
+  #
+  # Send the "com.equinix.password.update" event
+  #
+  - id: create-up-date-password-event
+    type: generateEvent
+    log: Devices are ready, generating the event to start password rotation
+    # log: jq(.)
+    event:
+      type: com.equinix.password.update
+      source: provision-machines
+      data: jq(.devicescount[0])
+    transition: check-if-done-update-password
+    transform: jq( del(.devicescount[0]) )
+
+  #
+  # Loop is completed - let's provision K3s using a subflow calling Git and Ansible
+  #
+  - id: provision-k3s
+    log: Start the provisioning of the k3s platform using Ansible
+    # log: jq(.)
+    type: action
+    action:
+      function: subflow-ansible-k3s
+      input: jq(.)
+    transform: 'jq( del(.devicescount) | { kubectl: .return.return.kubectl, devices: .devices, kubeconfig:  .return.var.kubeconfig } | del(.return)  )'
+    transition: slack-message-kubeconfig
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  #
+  # Send a slack message with the kubeconfig file attached
+  #
+  - id: slack-message-kubeconfig
+    log: Send a slack message
+    type: action
+    action:
+      function: slack
+      secrets: ["SLACK_URL"]
+      input: 
+        webhook-url: jq(.secrets."SLACK_URL")
+        content:
+          text: '*The Kubernetes Config file:* ```jq(.kubeconfig | @base64d)```'
+    transition: send-email
+    catch:
+    - error: "*"
+      transition: exception-catch
+  
+  #
+  # Send an unencrypted email message with the attachments.
+  #
+  - id: send-email
+    # log: jq(.)
+    log: Sending email to owner of the provisioned environment
+    type: action
+    action:
+      secrets: ["EMAIL_USER", "EMAIL_PASSWORD"]
+      function: send-email
+      input: 
+        smtp:
+          server: smtp.gmail.com:587
+          user: jq(.secrets.EMAIL_USER)
+          password: jq(.secrets.EMAIL_PASSWORD)
+        emails:
+        - from: equinix@direktiv.io
+          to:
+          - wwonigkeit@gmail.com
+          subject: 'Equinix Metal Provisioning completed: see body for details'
+          message:
+            name: message
+            data: 'jq(.devices | tostring) \ jq(.kubectl | tostring)'
+          contentType: text/html
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  #
+  # Handle any failed connections
+  #
+  - id: exception-catch
+    log: 'Failed with the following: jq(.) - creating an incident'
+    type: generateEvent
+    event: 
+      type: com.direktiv.exception.create.incident
+      source: provision-machines
+      data: jq(.error)

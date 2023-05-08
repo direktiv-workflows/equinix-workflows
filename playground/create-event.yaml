@@ -1,0 +1,12 @@
+description: "This is a subflow to create cloudevents from Metal API events"
+
+states:
+- id: create-cloud-event
+  log: 'Creating an event for jq(.href)'
+  type: generateEvent
+  event: 
+    type: direktiv.metal.cloudevent
+    source: /metal/v1/organizations/ed49fa53-743f-43aa-836b-e24f88f94d9c/events
+    context:
+      metalevent: jq(.type)
+    data: jq(.)  

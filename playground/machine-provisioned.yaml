@@ -1,0 +1,31 @@
+description: This is a dirty event retriever for Equinix Metal Events
+
+start:
+  type: eventsXor
+  state: print-details
+  events: 
+    - type: instance.deleted
+    - type: instance.created
+
+functions:
+  - id: metal-http-request
+    image: gcr.io/direktiv/functions/http-request:1.0
+    type: knative-workflow
+
+states:
+- id: print-details
+  type: noop
+  log: jq(.)
+
+- id: get-events
+  type: action
+  action:
+    function: metal-http-request
+    secrets: ["EQUINIX_METAL_TOKEN"]
+    input:
+      url: 'https://api.equinix.com/metal/v1/organizations/ed49fa53-743f-43aa-836b-e24f88f94d9c/events'
+      method: GET
+      headers:
+        X-Auth-Token: jq(.secrets.EQUINIX_METAL_TOKEN)
+
+

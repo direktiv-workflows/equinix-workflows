@@ -1,0 +1,34 @@
+description: This is a dirty event retriever for Equinix Metal Events
+
+# start:
+#   type: scheduled
+#   cron: '* * * * *' # Trigger a new instance every minute.
+#   state: get-events
+
+functions:
+  - id: metal-http-request
+    image: gcr.io/direktiv/functions/http-request:1.0
+    type: knative-workflow
+  - id: create-event
+    type: subflow
+    workflow: create-event
+
+states:
+- id: get-events
+  type: action
+  action:
+    function: metal-http-request
+    secrets: ["EQUINIX_METAL_TOKEN"]
+    input:
+      url: 'https://api.equinix.com/metal/v1/organizations/ed49fa53-743f-43aa-836b-e24f88f94d9c/events'
+      method: GET
+      headers:
+        X-Auth-Token: jq(.secrets.EQUINIX_METAL_TOKEN)
+  transition: create-cloud-events
+
+- id: create-cloud-events
+  type: foreach
+  array: jq(.return[0].result.events)
+  action:
+    function: create-event
+    input: jq(.)

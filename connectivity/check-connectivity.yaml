@@ -1,0 +1,43 @@
+#
+# Simple workflow which checks connectivity 
+#
+description: Workflow to verify the connectivity between the equinix provisioned machines and Direktiv
+
+functions:
+  - id: ssh
+    image: gcr.io/direktiv/functions/ssh:1.0
+    type: knative-workflow
+
+states:
+  - id: check-connectivity 
+    type: action
+    action:
+      function: ssh
+      secrets: ["EQUINIX_ID_RSA"]
+      input: 
+        files:
+        - name: cert
+          data: |
+            jq(.secrets.EQUINIX_ID_RSA)
+          mode: "0400"
+        host:
+          name: jq([.ip_addresses[] | select(.address_family==4)] | .[] | select(.public) | .address)
+        auth:
+          username: root
+          certificate: cert
+        commands:
+        - command: date
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  #
+  # Handle any failed connections
+  #
+  - id: exception-catch
+    log: 'Failed with the following: jq(.) - creating an incident'
+    type: generateEvent
+    event: 
+      type: com.direktiv.exception.create.incident
+      source: provision-machines
+      data: jq(.error)

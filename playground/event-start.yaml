@@ -1,0 +1,41 @@
+description: A simple workflow that waits for Equinix Events
+
+start:
+  type: eventsXor
+  state: check-event
+  events:
+  - type: ssh_key.created
+  - type: provisioning.110
+
+functions:
+  - id: http-request
+    service: http-request
+    type: knative-namespace
+
+states:
+  - id: check-event
+    log: jq(.)
+    type: switch
+    defaultTransition: print-event
+    conditions:
+    - condition: 'jq(."ssh_key.created" != null)'
+      transition: print-event
+    - condition: 'jq(."provisioning.110" != null)'
+      transition: print-node-info
+
+  - id: print-node-info
+    type: action
+    log: jq(.)
+    action:
+      function: http-request
+      secrets: ["EQUINIX_METAL_TOKEN"]
+      input:
+        url: jq("https://api.equinix.com/metal/v1/devices/" + ."provisioning.110".deviceid)
+        method: GET
+        headers:
+          X-Auth-Token: jq(.secrets.EQUINIX_METAL_TOKEN)
+    transform: jq(.return[0].result)
+
+  - id: print-event
+    type: noop
+    log: jq(.)

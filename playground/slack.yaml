@@ -1,0 +1,21 @@
+description: slack testing
+
+functions:
+- id: slack
+  image: gcr.io/direktiv/functions/slack:1.0
+  type: knative-workflow
+
+states:
+- id: slack-message
+  log: Send a Slack message with the kubectl information
+  # log: jq(.)
+  type: action
+  action:
+    function: slack
+    secrets: ["SLACK_URL"]
+    input: 
+      webhook-url: jq(.secrets."SLACK_URL")
+      content:
+        text: 'jq(. | tostring)'
+
+

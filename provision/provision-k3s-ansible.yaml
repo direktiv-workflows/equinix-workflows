@@ -1,0 +1,98 @@
+#
+# This is the Ansible workflow for deploying K3s
+#
+description: "The workflow will run k3s install with Ansible and then use kubectl to deploy an application"
+
+functions:
+  - id: ansible
+    image: gcr.io/direktiv/functions/ansible:1.1
+    type: knative-workflow
+  - id: git
+    image: gcr.io/direktiv/functions/git:1.0
+    type: knative-workflow
+  - id: kubectl
+    image: wwonigkeit/kubectl:1.0
+    type: knative-workflow
+
+states:
+  - id: clone-k3s-ansible
+    type: action
+    action:
+      function: git
+      input: 
+        commands:
+        - command: git clone https://github.com/k3s-io/k3s-ansible.git out/workflow/k3s-ansible.tar.gz
+    transition: deploy-k3s
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  - id: deploy-k3s
+    type: action
+    action:
+      function: ansible
+      secrets: ["EQUINIX_ID_RSA"]
+      files:
+      - key: k3s-ansible.tar.gz
+        scope: workflow
+        type: tar.gz
+        as: k3s-ansible
+      input: 
+        files:
+        - name: cert
+          data: |
+            jq(.secrets.EQUINIX_ID_RSA)
+          mode: "0400"
+        - name: hosts.ini
+          data: |
+            [master]
+            jq( [.devices[0].ip_addresses[] | select(.address_family==4)] | .[] | select(.public==true) | .address )
+
+            [node]
+            jq( ([[.devices[].ip_addresses[] | select(.address_family==4)] | .[] | select(.public==true) | .address])[1:] | join("\n") )
+
+            [k3s_cluster:children]
+            master
+            node
+        commands:
+        - command: cp -R k3s-ansible/inventory/sample k3s-ansible/inventory/my-cluster
+        - command: cp -R hosts.ini k3s-ansible/inventory/my-cluster/hosts.ini
+        - command: ansible-playbook k3s-ansible/site.yml -i k3s-ansible/inventory/my-cluster/hosts.ini --key-file cert --extra-vars "ansible_user=root k3s_version=v1.24.8+k3s1"
+        - command: scp -o StrictHostKeyChecking=no -i cert root@jq( [.devices[0].ip_addresses[] | select(.address_family==4)] | .[] | select(.public==true) | .address ):~/.kube/config out/namespace/kubeconfig
+    transition: get-kubeconfig
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  - id: get-kubeconfig
+    type: getter
+    variables:
+    - key: kubeconfig
+      scope: namespace
+    transition: check-kubectl
+
+  - id: check-kubectl
+    type: action
+    action:
+      function: kubectl
+      input: 
+        kubeconfig: jq(.var.kubeconfig)
+        commands:
+        - command: kubectl get nodes --output json
+        # - command: kubectl apply -f https://k8s.io/examples/controllers/nginx-deployment.yaml
+        - command: kubectl get pods -A --output json
+    transform: jq(del(.devices) | del(.devicescount))
+    catch:
+    - error: "*"
+      transition: exception-catch
+
+  #
+  # Handle any failed connections
+  #
+  - id: exception-catch
+    log: 'Failed with the following: jq(.) - creating an incident'
+    type: generateEvent
+    event: 
+      type: com.direktiv.exception.create.incident
+      source: provision-machines
+      data: jq(.error)
